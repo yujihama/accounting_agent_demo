@@ -9,17 +9,41 @@ import fitz  # PyMuPDF for PDF processing
 import docx  # python-docx for Word documents
 import pandas as pd
 import re
+from pydantic import ValidationError
+from .models import RuleSuggestionsResponse, RuleSuggestion, EnhancedRuleResponse
+import os
+from dotenv import load_dotenv
 
 class RuleSuggester:
     """ドキュメントからルール提案を生成するクラス"""
     
     def __init__(self, api_key: str = None):
+        # 環境変数をロード
+        load_dotenv()
+        
         self.api_key = api_key
         self.logger = logging.getLogger(__name__)
+        self.provider = os.getenv("OPENAI_PROVIDER", "openai")
+        
+        # プロバイダーに応じた設定
+        if self.provider == "azure":
+            self.azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+            self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4-turbo-preview")
+            self.azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
     
-    def set_api_key(self, api_key: str):
+    def set_api_key(self, api_key: str = None):
         """APIキーを設定"""
-        self.api_key = api_key
+        # 引数で渡されたAPIキーか、環境変数から取得
+        if api_key:
+            self.api_key = api_key
+        else:
+            if self.provider == "azure":
+                self.api_key = os.getenv("AZURE_OPENAI_API_KEY")
+            else:
+                self.api_key = os.getenv("OPENAI_API_KEY")
+        
+        if not self.api_key:
+            raise ValueError("APIキーが設定されていません。環境変数または引数で指定してください。")
     
     def process_uploaded_document(self, uploaded_file) -> str:
         """アップロードされたドキュメントからテキストを抽出"""
@@ -108,18 +132,34 @@ class RuleSuggester:
             prompt = self._create_rule_suggestion_prompt(document_content, existing_rules_summary)
             
             # OpenAI APIを呼び出し (新バージョン対応)
-            from openai import OpenAI
-            client = OpenAI(api_key=self.api_key)
+            from openai import OpenAI, AzureOpenAI
+            
+            # プロバイダーに応じてクライアントを作成
+            if self.provider == "azure":
+                client = AzureOpenAI(
+                    api_key=self.api_key,
+                    azure_endpoint=self.azure_endpoint,
+                    api_version=self.azure_api_version
+                )
+                model = self.azure_deployment
+            else:
+                client = OpenAI(api_key=self.api_key)
+                model = "gpt-4-turbo-preview"
+            
+            # レスポンススキーマを取得
+            response_schema = RuleSuggestionsResponse.model_json_schema()
             
             response = client.chat.completions.create(
-                model="gpt-4.1",
+                model=model,  # プロバイダーに応じたモデルを使用
                 messages=[
                     {
                         "role": "system",
-                        "content": """あなたは請求書チェックルールの専門家です。
+                        "content": f"""あなたは請求書チェックルールの専門家です。
                         提供されたドキュメントを分析し、請求書チェックに有用なルールを提案してください。
                         既存のルールと重複しないよう注意してください。
-                        結果は厳密にJSON形式で返してください。"""
+                        
+                        必ず以下のJSONスキーマに厳密に従った形式で回答してください：
+                        {json.dumps(response_schema, ensure_ascii=False, indent=2)}"""
                     },
                     {
                         "role": "user", 
@@ -127,14 +167,25 @@ class RuleSuggester:
                     }
                 ],
                 temperature=0.3,
-                max_tokens=2000
+                max_tokens=2000,
+                response_format={"type": "json_object"}
             )
             
             # レスポンスを解析
             response_text = response.choices[0].message.content.strip()
-            suggested_rules = self._parse_rule_suggestions(response_text)
             
-            return suggested_rules
+            try:
+                # JSONパースとPydantic検証
+                json_data = json.loads(response_text)
+                validated_response = RuleSuggestionsResponse(**json_data)
+                
+                # ルールリストを返す
+                return [rule.model_dump() for rule in validated_response.suggestions]
+                
+            except (json.JSONDecodeError, ValidationError) as e:
+                self.logger.error(f"ルール提案レスポンス検証エラー: {str(e)}")
+                # フォールバックとして従来のパース処理を試みる
+                return self._parse_rule_suggestions(response_text)
             
         except Exception as e:
             self.logger.error(f"ルール提案生成エラー: {str(e)}")
@@ -252,15 +303,32 @@ class RuleSuggester:
             }}
             """
             
-            from openai import OpenAI
-            client = OpenAI(api_key=self.api_key)
+            from openai import OpenAI, AzureOpenAI
+            
+            # プロバイダーに応じてクライアントを作成
+            if self.provider == "azure":
+                client = AzureOpenAI(
+                    api_key=self.api_key,
+                    azure_endpoint=self.azure_endpoint,
+                    api_version=self.azure_api_version
+                )
+                model = self.azure_deployment
+            else:
+                client = OpenAI(api_key=self.api_key)
+                model = "gpt-4-turbo-preview"
+            
+            # レスポンススキーマを取得
+            enhanced_schema = EnhancedRuleResponse.model_json_schema()
             
             response = client.chat.completions.create(
-                model="gpt-4.1",
+                model=model,  # プロバイダーに応じたモデルを使用
                 messages=[
                     {
                         "role": "system",
-                        "content": "あなたは請求書チェックルールの改善専門家です。"
+                        "content": f"""あなたは請求書チェックルールの改善専門家です。
+                        
+                        必ず以下のJSONスキーマに従った形式で回答してください：
+                        {json.dumps(enhanced_schema, ensure_ascii=False, indent=2)}"""
                     },
                     {
                         "role": "user",
@@ -268,17 +336,38 @@ class RuleSuggester:
                     }
                 ],
                 temperature=0.2,
-                max_tokens=1000
+                max_tokens=1000,
+                response_format={"type": "json_object"}
             )
             
             response_text = response.choices[0].message.content.strip()
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             
-            if json_match:
-                data = json.loads(json_match.group())
+            try:
+                # JSONパースとPydantic検証
+                json_data = json.loads(response_text)
+                validated_response = EnhancedRuleResponse(**json_data)
+                
                 enhanced_rule = base_rule.copy()
-                enhanced_rule['prompt'] = data.get('enhanced_prompt', base_rule['prompt'])
+                enhanced_rule['prompt'] = validated_response.enhanced_prompt
+                
+                # 改善点があれば追加
+                if validated_response.improvements:
+                    enhanced_rule['improvements'] = validated_response.improvements
+                
                 return enhanced_rule
+                
+            except (json.JSONDecodeError, ValidationError) as e:
+                self.logger.error(f"ルール改善レスポンス検証エラー: {str(e)}")
+                # フォールバック：従来のパース処理
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group())
+                        enhanced_rule = base_rule.copy()
+                        enhanced_rule['prompt'] = data.get('enhanced_prompt', base_rule['prompt'])
+                        return enhanced_rule
+                    except:
+                        pass
             
         except Exception as e:
             self.logger.error(f"ルール改善エラー: {str(e)}")

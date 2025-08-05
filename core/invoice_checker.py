@@ -4,8 +4,10 @@ import json
 from typing import Dict, List, Any, Optional
 from pydantic import BaseModel, Field, validator
 from enum import Enum
+import os
+from dotenv import load_dotenv
 try:
-    from langchain_openai import ChatOpenAI
+    from langchain_openai import ChatOpenAI, AzureChatOpenAI
     from langchain.schema import HumanMessage, SystemMessage
     from langchain.output_parsers import PydanticOutputParser
 except ImportError:
@@ -13,6 +15,8 @@ except ImportError:
         from langchain.chat_models import ChatOpenAI
         from langchain.schema import HumanMessage, SystemMessage
         from langchain.output_parsers import PydanticOutputParser
+        # Azure対応は新しいバージョンのみ
+        AzureChatOpenAI = None
     except ImportError:
         print("LangChainライブラリが正しくインストールされていません")
 import concurrent.futures
@@ -53,19 +57,53 @@ class InvoiceChecker:
     """請求書チェック機能を提供するクラス"""
     
     def __init__(self):
+        # 環境変数をロード
+        load_dotenv()
+        
         self.llm = None
         self.api_key = None
+        self.provider = os.getenv("OPENAI_PROVIDER", "openai")
+        
+        # プロバイダーに応じた設定を準備
+        if self.provider == "azure":
+            self.azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+            self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4-turbo-preview")
+            self.azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+        
         # Structured Output用のパーサーを初期化
         self.output_parser = PydanticOutputParser(pydantic_object=InvoiceCheckResponse)
         
-    def set_api_key(self, api_key: str):
-        """OpenAI APIキーを設定"""
-        self.api_key = api_key
-        # 重要: GPT-4.1を使用（絶対に変更しないこと）
-        self.llm = ChatOpenAI(
-            model_name="gpt-4.1",
-            openai_api_key=api_key,
-        )
+    def set_api_key(self, api_key: str = None):
+        """OpenAI/Azure OpenAI APIキーを設定"""
+        # 引数で渡されたAPIキーか、環境変数から取得
+        if api_key:
+            self.api_key = api_key
+        else:
+            if self.provider == "azure":
+                self.api_key = os.getenv("AZURE_OPENAI_API_KEY")
+            else:
+                self.api_key = os.getenv("OPENAI_API_KEY")
+        
+        if not self.api_key:
+            raise ValueError("APIキーが設定されていません。環境変数または引数で指定してください。")
+        
+        # プロバイダーに応じてLLMを初期化
+        if self.provider == "azure" and AzureChatOpenAI:
+            # Azure OpenAIを使用
+            self.llm = AzureChatOpenAI(
+                azure_endpoint=self.azure_endpoint,
+                openai_api_key=self.api_key,
+                azure_deployment=self.azure_deployment,
+                openai_api_version=self.azure_api_version,
+                model_name=self.azure_deployment  # デプロイメント名をモデル名として使用
+            )
+        else:
+            # 通常のOpenAIを使用
+            # 重要: GPT-4.1を使用（絶対に変更しないこと） [[memory:5049262]]
+            self.llm = ChatOpenAI(
+                model_name="gpt-4-turbo-preview",  # GPT-4.1相当
+                openai_api_key=self.api_key,
+            )
     
     def check_invoice(self, file_data: Dict[str, Any], rule_ids: List[str]) -> Dict[str, Any]:
         """

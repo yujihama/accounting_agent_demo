@@ -1,0 +1,35 @@
+{
+  "accounting_task_1": {
+    "name": "請求書・入金明細照合",
+    "description": "請求書と入金明細を照合し、各情報を抽出して結果を調書に記載する",
+    "input_structure": {
+      "evidence_folders": {
+        "required": true,
+        "structure": "2-tier",
+        "description": "1階層目：データ、2階層目：ドキュメント"
+      },
+      "excel_workbook": {
+        "required": true,
+        "description": "調書ファイル"
+      },
+      "instruction": {
+        "required": true,
+        "description": "処理指示"
+      }
+    },
+    "output_config": {
+      "target_sheet": "結果",
+      "start_row": 3,
+      "column_definitions": {
+        "A": {"key": "row_number", "header": "No.", "description": "行番号"},
+        "B": {"key": "data_id", "header": "データID", "description": "データ識別子"},
+        "C": {"key": "invoice_amount", "header": "請求金額", "description": "請求書の金額"},
+        "D": {"key": "payment_amount", "header": "入金金額", "description": "入金明細の金額"},
+        "E": {"key": "match_status", "header": "照合結果", "description": "照合の結果"},
+        "F": {"key": "variance", "header": "差額", "description": "請求金額と入金金額の差"},
+        "G": {"key": "remarks", "header": "備考", "description": "その他のコメント"}
+      }
+    },
+    "processing_prompt_template": "以下の証跡を分析し、{instruction}に基づいて処理してください。\n\n証跡データ:\n{evidence_data}\n\n指示:\n{instruction}\n\n結果を以下の形式で返してください:\n{output_format}"
+  }
+}

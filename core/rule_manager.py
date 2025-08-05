@@ -7,7 +7,7 @@ from pathlib import Path
 class RuleManager:
     """チェックルールの管理を行うクラス"""
     
-    def __init__(self, rules_file: str = "rules.json"):
+    def __init__(self, rules_file: str = "config/rules.json"):
         self.rules_file = Path(rules_file)
         self.rules = self._load_rules()
         self._initialize_default_rules()
