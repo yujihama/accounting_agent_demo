@@ -21,6 +21,7 @@ from core.folder_processor import FolderProcessor
 from core.excel_manager import ExcelManager
 from core.llm_client import LLMClient
 from core.task_engine import TaskEngine
+from core.ui_components import CommonUIComponents, ProgressManager
 
 # セッション状態の初期化
 def initialize_session_state():
@@ -89,41 +90,44 @@ def main():
         provider = os.getenv("OPENAI_PROVIDER", "openai")
         st.info(f"現在のプロバイダー: {provider.upper()}")
         
-        # APIキー設定
-        # 環境変数から自動的に読み込み
-        env_api_key = None
-        if provider == "azure":
-            env_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-        else:
-            env_api_key = os.getenv("OPENAI_API_KEY")
+        # APIキー設定（共通UIコンポーネントを使用）
+        provider_info = {
+            "provider": provider,
+            "model": "gpt-4-turbo-preview",
+            "configured": False
+        }
         
-        # APIキー入力フィールド（環境変数がある場合は自動入力）
-        api_key = st.text_input(
-            f"{provider.upper()} APIキー", 
-            value="[環境変数から設定済み]" if env_api_key else "",
-            type="password" if not env_api_key else "default",
-            key="openai_api_key",
-            help=f"{'Azure OpenAI' if provider == 'azure' else 'OpenAI'} APIキーを入力してください。.envファイルで設定済みの場合は自動的に読み込まれます。",
-            disabled=bool(env_api_key)
-        )
+        # 現在の設定状況を確認
+        try:
+            provider_info["configured"] = (
+                st.session_state.checker.is_configured() and 
+                st.session_state.task_engine.llm_client.client is not None
+            )
+        except:
+            provider_info["configured"] = False
         
-        # APIキーが環境変数または入力から取得できる場合
-        actual_api_key = env_api_key if env_api_key else (api_key if api_key and api_key != "[環境変数から設定済み]" else None)
+        api_key_input = CommonUIComponents.show_api_key_configuration(provider_info)
         
-        if actual_api_key:
-            try:
-                # 既存機能にAPIキー設定
-                st.session_state.checker.set_api_key(actual_api_key)
-                st.session_state.suggester.set_api_key(actual_api_key)
-                # 新機能にAPIキー設定
-                st.session_state.task_engine.set_api_key(actual_api_key)
-                
-                if env_api_key:
-                    st.success("APIキーが環境変数から自動的に設定されました")
-                else:
-                    st.success("APIキーが設定されました")
-            except Exception as e:
-                st.error(f"APIキー設定エラー: {str(e)}")
+        # プロバイダー詳細情報を表示
+        CommonUIComponents.show_provider_details(provider_info)
+        
+        # APIキーが入力された場合の設定処理
+        if api_key_input and not provider_info["configured"]:
+            if st.button("APIキーを設定", use_container_width=True):
+                try:
+                    # 既存機能にAPIキー設定
+                    checker_success = st.session_state.checker.set_api_key(api_key_input)
+                    suggester_success = st.session_state.suggester.set_api_key(api_key_input)
+                    # 新機能にAPIキー設定
+                    st.session_state.task_engine.set_api_key(api_key_input)
+                    
+                    if checker_success and suggester_success:
+                        st.success("✅ APIキーが正常に設定されました")
+                        st.rerun()
+                    else:
+                        st.error("❌ APIキー設定に失敗しました")
+                except Exception as e:
+                    st.error(f"❌ APIキー設定エラー: {str(e)}")
         
         # 処理設定
         st.markdown("### 処理設定")
@@ -141,13 +145,16 @@ def main():
         # システム情報
         st.markdown("### 情報")
         st.markdown("---")
-        st.info(f"**モード**: {app_mode}")
-        st.info(f"**モデル**: GPT-4.1")
-        st.info(f"**並列処理**: {max_workers} ファイル")
-        if actual_api_key:
-            st.info("**APIキー**: 設定済み")
-        else:
-            st.warning("**APIキー**: 未設定")
+        
+        system_config = {
+            "モード": app_mode,
+            "モデル": "GPT-4.1",
+            "並列処理": f"{max_workers} ファイル",
+            "APIキー": "設定済み" if provider_info["configured"] else "未設定",
+            "プロバイダー": provider_info["provider"].upper()
+        }
+        
+        CommonUIComponents.show_configuration_summary(system_config, "システム設定")
     
     # モードに応じたUIを表示
     if app_mode == "請求書チェック":

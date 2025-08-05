@@ -7,19 +7,12 @@ from enum import Enum
 import os
 from dotenv import load_dotenv
 try:
-    from langchain_openai import ChatOpenAI, AzureChatOpenAI
     from langchain.schema import HumanMessage, SystemMessage
     from langchain.output_parsers import PydanticOutputParser
 except ImportError:
-    try:
-        from langchain.chat_models import ChatOpenAI
-        from langchain.schema import HumanMessage, SystemMessage
-        from langchain.output_parsers import PydanticOutputParser
-        # Azure対応は新しいバージョンのみ
-        AzureChatOpenAI = None
-    except ImportError:
-        print("LangChainライブラリが正しくインストールされていません")
+    print("LangChainライブラリが正しくインストールされていません")
 import concurrent.futures
+from .base_llm_service import BaseLLMService, BaseDataValidator, BaseProcessor
 
 class SeverityLevel(str, Enum):
     """重要度レベルの定義"""
@@ -53,57 +46,27 @@ class InvoiceCheckResponse(BaseModel):
     """GPT-4.1からのレスポンス全体のPydanticモデル"""
     check_result: CheckResult = Field(description="チェック結果")
 
-class InvoiceChecker:
-    """請求書チェック機能を提供するクラス"""
+class InvoiceChecker(BaseLLMService, BaseProcessor):
+    """請求書チェック機能を提供するクラス（共通基盤を使用）"""
     
     def __init__(self):
-        # 環境変数をロード
-        load_dotenv()
-        
-        self.llm = None
-        self.api_key = None
-        self.provider = os.getenv("OPENAI_PROVIDER", "openai")
-        
-        # プロバイダーに応じた設定を準備
-        if self.provider == "azure":
-            self.azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-            self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4-turbo-preview")
-            self.azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+        # 共通基盤を初期化
+        BaseLLMService.__init__(self)
+        BaseProcessor.__init__(self, "InvoiceChecker")
         
         # Structured Output用のパーサーを初期化
         self.output_parser = PydanticOutputParser(pydantic_object=InvoiceCheckResponse)
+    
+    def validate_service_specific_config(self) -> Dict[str, Any]:
+        """請求書チェック固有の設定を検証"""
+        result = {"valid": True, "errors": [], "warnings": []}
         
-    def set_api_key(self, api_key: str = None):
-        """OpenAI/Azure OpenAI APIキーを設定"""
-        # 引数で渡されたAPIキーか、環境変数から取得
-        if api_key:
-            self.api_key = api_key
-        else:
-            if self.provider == "azure":
-                self.api_key = os.getenv("AZURE_OPENAI_API_KEY")
-            else:
-                self.api_key = os.getenv("OPENAI_API_KEY")
+        # Structured Outputパーサーの確認
+        if not self.output_parser:
+            result["valid"] = False
+            result["errors"].append("Structured Outputパーサーが初期化されていません")
         
-        if not self.api_key:
-            raise ValueError("APIキーが設定されていません。環境変数または引数で指定してください。")
-        
-        # プロバイダーに応じてLLMを初期化
-        if self.provider == "azure" and AzureChatOpenAI:
-            # Azure OpenAIを使用
-            self.llm = AzureChatOpenAI(
-                azure_endpoint=self.azure_endpoint,
-                openai_api_key=self.api_key,
-                azure_deployment=self.azure_deployment,
-                openai_api_version=self.azure_api_version,
-                model_name=self.azure_deployment  # デプロイメント名をモデル名として使用
-            )
-        else:
-            # 通常のOpenAIを使用
-            # 重要: GPT-4.1を使用（絶対に変更しないこと） [[memory:5049262]]
-            self.llm = ChatOpenAI(
-                model_name="gpt-4-turbo-preview",  # GPT-4.1相当
-                openai_api_key=self.api_key,
-            )
+        return result
     
     def check_invoice(self, file_data: Dict[str, Any], rule_ids: List[str]) -> Dict[str, Any]:
         """
@@ -116,12 +79,24 @@ class InvoiceChecker:
         Returns:
             チェック結果
         """
-        if not self.llm:
+        # 設定の確認
+        if not self.is_configured():
             return {"error": "OpenAI APIキーが設定されていません"}
         
+        # 入力データの検証
+        file_validation = self.validator.validate_file_data(file_data)
+        if not file_validation["valid"]:
+            return {"error": f"ファイルデータエラー: {', '.join(file_validation['errors'])}"}
+        
+        rule_validation = self.validator.validate_rule_ids(rule_ids)
+        if not rule_validation["valid"]:
+            return {"error": f"ルールIDエラー: {', '.join(rule_validation['errors'])}"}
+        
         try:
+            self.log_info(f"請求書チェック開始: {file_data.get('file_name', '不明')}")
+            
             # ルール管理からルールを取得
-            from rule_manager import RuleManager
+            from .rule_manager import RuleManager
             rule_manager = RuleManager()
             
             checks = []
@@ -129,17 +104,33 @@ class InvoiceChecker:
             for rule_id in rule_ids:
                 rule = rule_manager.get_rule(rule_id)
                 if rule:
+                    self.log_info(f"ルール適用中: {rule.get('name', rule_id)}")
                     check_result = self._apply_rule(file_data, rule)
                     checks.append(check_result)
+                else:
+                    self.log_warning(f"ルールが見つかりません: {rule_id}")
             
-            return {
+            result = {
                 "file_name": file_data.get("file_name", "不明"),
                 "checks": checks,
                 "checked_at": datetime.now().isoformat()
             }
             
+            self.log_info(f"請求書チェック完了: {len(checks)}件のルールを適用")
+            return result
+            
         except Exception as e:
-            return {"error": f"チェック処理中にエラーが発生しました: {str(e)}"}
+            return self.handle_exception("請求書チェック", e)
+    
+    def process(self, *args, **kwargs) -> Dict[str, Any]:
+        """
+        BaseProcessorのabstractメソッド実装
+        check_invoiceのラッパー
+        """
+        if len(args) >= 2:
+            return self.check_invoice(args[0], args[1])
+        else:
+            return {"success": False, "error": "引数が不足しています（file_data, rule_ids）"}
     
     def _apply_rule(self, file_data: Dict[str, Any], rule: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -173,6 +164,7 @@ class InvoiceChecker:
             return result
             
         except Exception as e:
+            self.log_error(f"ルール適用エラー ({rule.get('name', '不明')}): {str(e)}")
             return {
                 "rule_name": rule.get("name", "不明"),
                 "severity": SeverityLevel.ERROR.value,
