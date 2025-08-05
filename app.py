@@ -98,13 +98,35 @@ def main():
         }
         
         # 現在の設定状況を確認
-        try:
-            provider_info["configured"] = (
-                st.session_state.checker.is_configured() and 
-                st.session_state.task_engine.llm_client.client is not None
-            )
-        except:
-            provider_info["configured"] = False
+        def is_task_engine_configured():
+            """タスクエンジンの設定状況を安全にチェック"""
+            try:
+                # task_engine の存在確認
+                if not hasattr(st.session_state, 'task_engine') or st.session_state.task_engine is None:
+                    return False
+                
+                # llm_client の存在確認
+                if not hasattr(st.session_state.task_engine, 'llm_client') or st.session_state.task_engine.llm_client is None:
+                    return False
+                
+                # client の存在確認
+                if not hasattr(st.session_state.task_engine.llm_client, 'client') or st.session_state.task_engine.llm_client.client is None:
+                    return False
+                
+                return True
+            except AttributeError as e:
+                # 構造的な問題がある場合はログに記録
+                print(f"Warning: TaskEngine structure issue: {e}")
+                return False
+            except Exception as e:
+                # その他の予期しないエラー
+                print(f"Unexpected error checking TaskEngine configuration: {e}")
+                return False
+        
+        provider_info["configured"] = (
+            st.session_state.checker.is_configured() and 
+            is_task_engine_configured()
+        )
         
         api_key_input = CommonUIComponents.show_api_key_configuration(provider_info)
         
