@@ -4,14 +4,18 @@ from datetime import datetime
 from .llm_client import LLMClient
 from .excel_manager import ExcelManager
 from .folder_processor import FolderProcessor
+from .base_llm_service import BaseLLMService, BaseDataValidator, BaseProcessor
 
-class TaskEngine:
+class TaskEngine(BaseProcessor):
     """
-    指示実行エンジン
+    指示実行エンジン（共通基盤を使用）
     ユーザーの指示に基づいて証跡データを処理し、調書に結果を記載
     """
     
     def __init__(self):
+        # 共通基盤を初期化
+        BaseProcessor.__init__(self, "TaskEngine")
+        
         self.llm_client = LLMClient()
         self.excel_manager = ExcelManager()
         self.folder_processor = FolderProcessor()
@@ -23,13 +27,15 @@ class TaskEngine:
         try:
             with open("config/task_configs.json", "r", encoding="utf-8") as f:
                 self.task_configs = json.load(f)
+                self.log_info(f"タスク設定を読み込みました: {len(self.task_configs)}件")
         except Exception as e:
-            print(f"タスク設定読み込みエラー: {str(e)}")
+            self.log_error(f"タスク設定読み込みエラー: {str(e)}")
             self.task_configs = {}
     
     def set_api_key(self, api_key: str):
         """APIキーを設定"""
         self.llm_client.set_api_key(api_key)
+        self.log_info("APIキーを設定しました")
     
     def execute_accounting_task(self, task_config_id: str, evidence_data: Dict[str, Any], 
                               excel_manager, instruction: str, 
@@ -50,17 +56,33 @@ class TaskEngine:
             実行結果
         """
         try:
+            self.log_info(f"経理業務タスク実行開始: {task_config_id}")
+            
             # タスク設定を取得
             if task_config_id not in self.task_configs:
-                return {"success": False, "error": f"タスク設定が見つかりません: {task_config_id}"}
+                error_msg = f"タスク設定が見つかりません: {task_config_id}"
+                self.log_error(error_msg)
+                return {"success": False, "error": error_msg}
             
             task_config = self.task_configs[task_config_id]
             output_config = custom_output_config or task_config.get("output_config", {})
             
-            # 前提条件チェック
-            validation_result = self._validate_inputs(evidence_data, excel_manager, output_config)
-            if not validation_result["valid"]:
-                return {"success": False, "error": validation_result["error"]}
+            # 前提条件チェック（共通バリデーターを使用）
+            evidence_validation = self.validator.validate_evidence_data(evidence_data)
+            if not evidence_validation["valid"]:
+                self.log_error(f"証跡データ検証エラー: {evidence_validation['errors']}")
+                return {"success": False, "error": f"証跡データエラー: {', '.join(evidence_validation['errors'])}"}
+            
+            output_validation = self.validator.validate_output_config(output_config)
+            if not output_validation["valid"]:
+                self.log_error(f"出力設定検証エラー: {output_validation['errors']}")
+                return {"success": False, "error": f"出力設定エラー: {', '.join(output_validation['errors'])}"}
+            
+            # ExcelManagerチェック
+            if not excel_manager or not hasattr(excel_manager, 'workbook') or not excel_manager.workbook:
+                error_msg = "Excelワークブックが読み込まれていません"
+                self.log_error(error_msg)
+                return {"success": False, "error": error_msg}
             
             # Excel Manager を一時的に設定
             original_excel_manager = self.excel_manager
@@ -68,7 +90,11 @@ class TaskEngine:
             
             # データ件数を取得
             data_count = len(evidence_data.get("data", {}))
-            print(f"処理開始: {data_count}件のデータを{max_workers}並列で処理します")
+            self.log_info(f"処理開始: {data_count}件のデータを{max_workers}並列で処理します")
+            
+            # 進捗コールバックを作成（共通基盤を使用）
+            if not progress_callback:
+                progress_callback = self.create_progress_callback("経理業務処理", data_count)
             
             # LLMで処理実行（データごとに並列処理）
             # タスク設定のプロンプトテンプレートを活用
@@ -84,13 +110,15 @@ class TaskEngine:
             )
             
             if not llm_result["success"]:
+                self.log_error(f"LLM処理エラー: {llm_result.get('error', '不明')}")
                 return llm_result
             
             # 処理エラーがある場合は警告表示
             if llm_result.get("processing_errors"):
-                print(f"警告: {len(llm_result['processing_errors'])}件のデータで処理エラーが発生しました")
+                error_count = len(llm_result['processing_errors'])
+                self.log_warning(f"{error_count}件のデータで処理エラーが発生しました")
                 for error in llm_result["processing_errors"]:
-                    print(f"  - {error}")
+                    self.log_warning(f"  - {error}")
             
             # 結果をExcelに書き込み
             write_result = self._write_results_to_excel(llm_result["data"], output_config)
@@ -112,39 +140,26 @@ class TaskEngine:
             # Excel Managerを元に戻す
             self.excel_manager = original_excel_manager
             
+            self.log_info(f"経理業務タスク実行完了: {summary.get('processed_data_count', 0)}件処理")
             return result
             
         except Exception as e:
             # エラー時もExcel Managerを元に戻す
             if 'original_excel_manager' in locals():
                 self.excel_manager = original_excel_manager
-            return {
-                "success": False,
-                "error": f"タスク実行エラー: {str(e)}"
-            }
+            return self.handle_exception("経理業務タスク実行", e)
     
-    def _validate_inputs(self, evidence_data: Dict[str, Any], excel_manager, 
-                        output_config: Dict[str, Any]) -> Dict[str, Any]:
-        """入力データの妥当性を検証"""
-        
-        # 証跡データチェック
-        if not evidence_data.get("success"):
-            return {"valid": False, "error": "証跡データが正常に処理されていません"}
-        
-        if not evidence_data.get("data"):
-            return {"valid": False, "error": "証跡データが空です"}
-        
-        # ExcelManagerチェック
-        if not excel_manager or not hasattr(excel_manager, 'workbook') or not excel_manager.workbook:
-            return {"valid": False, "error": "Excelワークブックが読み込まれていません"}
-        
-        # 出力設定チェック
-        required_keys = ["target_sheet", "start_row", "column_definitions"]
-        for key in required_keys:
-            if key not in output_config:
-                return {"valid": False, "error": f"出力設定に{key}が指定されていません"}
-        
-        return {"valid": True}
+    def process(self, *args, **kwargs) -> Dict[str, Any]:
+        """
+        BaseProcessorのabstractメソッド実装
+        execute_accounting_taskのラッパー
+        """
+        if len(args) >= 4:
+            return self.execute_accounting_task(args[0], args[1], args[2], args[3], **kwargs)
+        else:
+            return {"success": False, "error": "引数が不足しています"}
+    
+
     
     def _write_results_to_excel(self, llm_data: Dict[str, Any], output_config: Dict[str, Any]) -> Dict[str, Any]:
         """LLM処理結果をExcelに書き込み"""
@@ -187,8 +202,8 @@ class TaskEngine:
             "tokens_used": llm_result.get("tokens_used", 0),
             "processing_details": {
                 "total_amount": summary_data.get("total_amount", 0),
-                "match_count": summary_data.get("match_count", 0),
-                "mismatch_count": summary_data.get("mismatch_count", 0),
+                "matched_count": summary_data.get("matched_count", 0),
+                "unmatched_count": summary_data.get("unmatched_count", 0),
                 "processing_errors": processing_errors
             }
         }

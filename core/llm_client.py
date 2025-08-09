@@ -24,11 +24,11 @@ class LLMClient:
         
         # プロバイダーに応じた設定
         if self.provider == "azure":
-            self.model = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4-turbo-preview")
+            self.model = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
             self.azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
             self.azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
         else:
-            self.model = "gpt-4-turbo-preview"  # GPT-4.1相当
+            self.model = "gpt-4.1"  # GPT-4.1相当
     
     def set_api_key(self, api_key: str = None):
         """APIキーを設定"""
@@ -141,13 +141,37 @@ class LLMClient:
                         print(f"エラー発生: {completed_count}/{total_data_count} ({data_id}) - {str(e)}")
             
             # 集約結果を作成
+            def _extract_amount_from_result(result: Dict[str, Any]) -> float:
+                # result_data配下を優先して数値金額を抽出
+                amount_candidates = []
+                if isinstance(result.get("result_data"), dict):
+                    rd = result["result_data"]
+                    for key in ["amount", "total_amount", "invoice_amount", "payment_amount"]:
+                        val = rd.get(key)
+                        if isinstance(val, (int, float)):
+                            amount_candidates.append(float(val))
+                # 旧形式（トップレベル）もフォールバック
+                for key in ["amount", "total_amount"]:
+                    val = result.get(key)
+                    if isinstance(val, (int, float)):
+                        amount_candidates.append(float(val))
+                return amount_candidates[0] if amount_candidates else 0.0
+
+            def _extract_match_status(result: Dict[str, Any]) -> Optional[str]:
+                if isinstance(result.get("result_data"), dict) and "match_status" in result["result_data"]:
+                    return result["result_data"].get("match_status")
+                return result.get("match_status")
+
+            matched_count_val = len([r for r in all_results if _extract_match_status(r) == "一致"])
+            unmatched_count_val = len([r for r in all_results if _extract_match_status(r) == "不一致"])
+
             aggregated_data = {
                 "results": all_results,
                 "summary": {
                     "total_processed": len(all_results),
-                    "total_amount": sum(r.get("amount", 0) for r in all_results if isinstance(r.get("amount"), (int, float))),
-                    "match_count": len([r for r in all_results if r.get("match_status") == "一致"]),
-                    "mismatch_count": len([r for r in all_results if r.get("match_status") == "不一致"]),
+                    "total_amount": sum(_extract_amount_from_result(r) for r in all_results),
+                    "matched_count": matched_count_val,
+                    "unmatched_count": unmatched_count_val,
                     "processing_errors": processing_errors
                 }
             }
@@ -351,19 +375,26 @@ class LLMClient:
         output_keys = [col_def.get('key', '') for col_def in output_format["column_definitions"].values() 
                       if col_def.get('key') != 'row_number']
         
-        # JSON例を生成
-        example_result = {"data_id": "データ識別子"}
+        # JSON例を生成（必須フィールドを明示）
+        example_result_data = {}
         for key in output_keys:
             if key and key != "data_id":
-                example_result[key] = f"{key}の値"
-        
+                example_result_data[key] = f"{key}の値"
+
+        example_result = {
+            # data_id はLLMには出力させない（システム側で補完）
+            "task_type": "処理の種別（例: 'invoice_check' など）",
+            "status": "完了",
+            "result_data": example_result_data
+        }
+
         format_lines.append(json.dumps({
             "results": [example_result],
             "summary": {
                 "total_processed": "処理件数",
                 "total_amount": "合計金額（該当する場合）",
-                "match_count": "一致件数（照合の場合）",
-                "mismatch_count": "不一致件数（照合の場合）"
+                "matched_count": "一致件数（照合の場合）",
+                "unmatched_count": "不一致件数（照合の場合）"
             }
         }, ensure_ascii=False, indent=2))
         

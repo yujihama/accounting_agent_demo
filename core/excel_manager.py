@@ -112,6 +112,19 @@ class ExcelManager:
                                data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """データをシートに書き込み"""
         try:
+            def _get_value_from_path(obj: Any, path: str) -> Any:
+                if not isinstance(obj, dict) or not path:
+                    return None
+                # ドット記法に対応
+                parts = path.split('.')
+                current = obj
+                for part in parts:
+                    if isinstance(current, dict) and part in current:
+                        current = current[part]
+                    else:
+                        return None
+                return current
+
             # ヘッダー行を書き込み
             for col_letter, col_def in sorted(column_definitions.items()):
                 col_index = column_index_from_string(col_letter)
@@ -134,7 +147,23 @@ class ExcelManager:
                     if col_def["key"] == "row_number":
                         cell.value = row_idx + 1
                     else:
-                        cell.value = row_data.get(col_def["key"], "")
+                        key = col_def["key"]
+                        # 1) そのままのキーでトップレベルを参照
+                        value = row_data.get(key, None)
+                        # 2) 空 or None の場合は result_data 配下を参照
+                        if (value is None or value == "") and isinstance(row_data.get("result_data"), dict):
+                            # ドット記法キーにも対応
+                            nested = _get_value_from_path(row_data["result_data"], key)
+                            value = nested if nested is not None else row_data["result_data"].get(key, "")
+                        # 3) ドット記法キーでトップレベルを参照
+                        if (value is None or value == "") and ('.' in key):
+                            top_level_nested = _get_value_from_path(row_data, key)
+                            if top_level_nested is not None:
+                                value = top_level_nested
+                        # 4) 複合型はJSON文字列化
+                        if isinstance(value, (dict, list)):
+                            value = json.dumps(value, ensure_ascii=False)
+                        cell.value = value
                     
                     # データのスタイルを設定
                     cell.alignment = Alignment(horizontal="left", vertical="center")

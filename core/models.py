@@ -8,7 +8,7 @@ from datetime import datetime
 
 class AccountingResult(BaseModel):
     """経理業務処理の個別結果"""
-    data_id: str = Field(description="データID")
+    data_id: Optional[str] = Field(default=None, description="データID（省略可。システム側で補完）")
     task_type: str = Field(description="タスクタイプ")
     status: str = Field(description="処理ステータス", default="完了")
     result_data: Dict[str, Any] = Field(description="処理結果データ")

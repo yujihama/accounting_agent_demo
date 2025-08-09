@@ -28,7 +28,7 @@ class RuleSuggester:
         # プロバイダーに応じた設定
         if self.provider == "azure":
             self.azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-            self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4-turbo-preview")
+            self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1")
             self.azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
     
     def set_api_key(self, api_key: str = None):
@@ -144,7 +144,7 @@ class RuleSuggester:
                 model = self.azure_deployment
             else:
                 client = OpenAI(api_key=self.api_key)
-                model = "gpt-4-turbo-preview"
+                model = "gpt-4.1"
             
             # レスポンススキーマを取得
             response_schema = RuleSuggestionsResponse.model_json_schema()
@@ -315,7 +315,7 @@ class RuleSuggester:
                 model = self.azure_deployment
             else:
                 client = OpenAI(api_key=self.api_key)
-                model = "gpt-4-turbo-preview"
+                model = "gpt-4.1"
             
             # レスポンススキーマを取得
             enhanced_schema = EnhancedRuleResponse.model_json_schema()
