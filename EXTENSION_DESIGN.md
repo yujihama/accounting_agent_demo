@@ -180,7 +180,7 @@ extract_invoice/
 ### APIキー管理
 ```python
 # GPT-4.1の明示的な使用
-model = "gpt-4-turbo-preview"  # GPT-4.1相当
+model = "gpt-4.1"
 ```
 
 ### 設定管理
